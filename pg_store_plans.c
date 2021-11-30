@@ -578,7 +578,7 @@ pgsp_shmem_startup(void)
 {
 	bool found;
 	HASHCTL info;
-	FILE *file;
+	FILE *file = NULL;
 	FILE *pfile = NULL;
 	uint32 header;
 	int32 num;
@@ -1468,8 +1468,8 @@ pg_store_plans_internal(FunctionCallInfo fcinfo,
 		}
 		else
 		{
-			nulls[i++] = true;	/* queryid */
-			nulls[i++] = true;	/* planid */
+			nulls[i++] = true; /* queryid */
+			nulls[i++] = true; /* planid */
 
 			/* queryid_stat_statemetns*/
 			if (api_version == PGSP_V1_5)
@@ -1503,6 +1503,7 @@ pg_store_plans_internal(FunctionCallInfo fcinfo,
 				mstr = pgsp_json_xmlize(pstr);
 				break;
 			default:
+				mstr = pstr;
 				break;
 			}
 
@@ -1735,6 +1736,9 @@ entry_dealloc(void)
 	entries = palloc(hash_get_num_entries(hash_table) * sizeof(pgspEntry *));
 
 	i = 0;
+	tottextlen = 0;
+	nvalidtexts = 0;
+
 	hash_seq_init(&hash_seq, hash_table);
 	while ((entry = hash_seq_search(&hash_seq)) != NULL)
 	{
