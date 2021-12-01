@@ -212,9 +212,10 @@ static HTAB *hash_table = NULL;
 
 typedef enum
 {
-	TRACK_LEVEL_NONE, /* track no statements */
-	TRACK_LEVEL_TOP,  /* only top level statements */
-	TRACK_LEVEL_ALL,  /* all statements, including nested ones */
+	TRACK_LEVEL_NONE,	/* track no statements */
+	TRACK_LEVEL_TOP,	/* only top level statements */
+	TRACK_LEVEL_ALL,	/* all statements, including nested ones */
+	TRACK_LEVEL_VERBOSE /* all statements, including internal ones */
 } PGSPTrackLevel;
 
 static const struct config_enum_entry track_options[] =
@@ -222,6 +223,7 @@ static const struct config_enum_entry track_options[] =
 		{"none", TRACK_LEVEL_NONE, false},
 		{"top", TRACK_LEVEL_TOP, false},
 		{"all", TRACK_LEVEL_ALL, false},
+		{"verbose", TRACK_LEVEL_VERBOSE, false},
 		{NULL, 0, false}};
 
 typedef enum
@@ -268,6 +270,9 @@ static int plan_format;		  /* Plan representation style in
 							   * pg_store_plans.plan  */
 static int plan_storage;	  /* Plan storage type */
 
+/* disables tracking overriding track_level */
+static bool force_disabled = false;
+
 #if PG_VERSION_NUM >= 140000
 /*
  * For pg14 and later, we rely on core queryid calculation.  If
@@ -276,13 +281,15 @@ static int plan_storage;	  /* Plan storage type */
  * will also consider that this extension is disabled.
  */
 #define pgsp_enabled(q)                                         \
-	((track_level == TRACK_LEVEL_ALL ||                         \
+	(!force_disabled &&                                         \
+	 (track_level >= TRACK_LEVEL_ALL ||                         \
 	  (track_level == TRACK_LEVEL_TOP && nested_level == 0)) && \
 	 (q != PGSP_NO_QUERYID))
 #else
-#define pgsp_enabled(q)                \
-	(track_level == TRACK_LEVEL_ALL || \
-	 (track_level == TRACK_LEVEL_TOP && nested_level == 0))
+#define pgsp_enabled(q)                 \
+	(!force_disabled &&                 \
+	 (track_level >= TRACK_LEVEL_ALL || \
+	  (track_level == TRACK_LEVEL_TOP && nested_level == 0)))
 #endif
 
 #define SHMEM_PLAN_PTR(ent) (((char *)ent) + sizeof(pgspEntry))
@@ -1077,20 +1084,47 @@ pgsp_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 					QueryEnvironment *queryEnv,
 					DestReceiver *dest, COMPTAG_TYPE *completionTag)
 {
-	if (prev_ProcessUtility)
-		prev_ProcessUtility(pstmt, queryString,
-#if PG_VERSION_NUM >= 140000
-							readOnlyTree,
-#endif
-							context, params, queryEnv,
-							dest, completionTag);
-	else
-		standard_ProcessUtility(pstmt, queryString,
+	int tag = nodeTag(pstmt->utilityStmt);
+	queryid_t saved_queryId = pstmt->queryId;
+	bool reset_force_disabled = false;
+
+	if (pgsp_enabled(saved_queryId) &&
+		(tag == T_CreateExtensionStmt || tag == T_AlterExtensionStmt) &&
+		!force_disabled && track_level < TRACK_LEVEL_VERBOSE)
+	{
+		force_disabled = true;
+		reset_force_disabled = true;
+	}
+
+	PG_TRY();
+	{
+		if (prev_ProcessUtility)
+		{
+			prev_ProcessUtility(pstmt, queryString,
 #if PG_VERSION_NUM >= 140000
 								readOnlyTree,
 #endif
 								context, params, queryEnv,
 								dest, completionTag);
+		}
+		else
+			standard_ProcessUtility(pstmt, queryString,
+#if PG_VERSION_NUM >= 140000
+									readOnlyTree,
+#endif
+									context, params, queryEnv,
+									dest, completionTag);
+
+		if (reset_force_disabled)
+			force_disabled = false;
+	}
+	PG_CATCH();
+	{
+		if (reset_force_disabled)
+			force_disabled = false;
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 }
 
 /*
